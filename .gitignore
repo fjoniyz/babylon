@@ -1,0 +1,49 @@
+# Binaries and build artifacts
+/babylon
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go dependency and cache files
+vendor/
+
+# Secrets, private keys, and environment files
+*.pem
+*.key
+*.pkcs12
+.env
+.env.*
+!.env.example
+
+# Python virtual environments & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Pulumi local state / cache
+.pulumi/
+
+# Local workspaces & temporary files
+workspaces/
+tmp/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

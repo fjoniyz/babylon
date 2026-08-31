@@ -1,10 +1,10 @@
-# 🏗️ Babylon
+# Babylon
 
 **Babylon** is a lightweight, self-hosted GitOps automation server for **Pulumi** that enables teams to preview, apply, and destroy infrastructure changes directly from GitHub Pull Request comments.
 
 ---
 
-## ⚡ Capabilities
+## Capabilities
 
 - **PR Comment-Driven Infrastructure Operations**:
   - `pulumi preview [--stack <name>]`: Runs a preview against the PR branch, acquires an S3 lock, and posts the resource diff.
