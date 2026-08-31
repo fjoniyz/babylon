@@ -1,4 +1,4 @@
-package internal
+package lock
 
 import (
 	"bytes"
@@ -35,16 +35,16 @@ type Lock struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-// S3LockManager manages stack locking and session tracking via an S3 state bucket.
-type S3LockManager struct {
+// Manager manages stack locking and session tracking via an S3 state bucket.
+type Manager struct {
 	s3Client *s3.Client
 	bucket   string
 	region   string
 	baseDir  string
 }
 
-// NewS3LockManager creates a new S3LockManager using AWS default credentials.
-func NewS3LockManager(ctx context.Context, bucket string, baseDir string) (*S3LockManager, error) {
+// NewManager creates a new S3 Lock Manager using AWS default credentials.
+func NewManager(ctx context.Context, bucket string, baseDir string) (*Manager, error) {
 	if bucket == "" {
 		bucket = os.Getenv("STATE_BUCKET")
 		if bucket == "" {
@@ -86,7 +86,7 @@ func NewS3LockManager(ctx context.Context, bucket string, baseDir string) (*S3Lo
 		}
 	}
 
-	return &S3LockManager{
+	return &Manager{
 		s3Client: s3Client,
 		bucket:   bucket,
 		region:   currentRegion,
@@ -94,29 +94,31 @@ func NewS3LockManager(ctx context.Context, bucket string, baseDir string) (*S3Lo
 	}, nil
 }
 
-func (m *S3LockManager) Bucket() string {
+// Bucket returns the configured S3 bucket name.
+func (m *Manager) Bucket() string {
 	return m.bucket
 }
 
-func (m *S3LockManager) Region() string {
+// Region returns the resolved AWS region.
+func (m *Manager) Region() string {
 	return m.region
 }
 
-func (m *S3LockManager) lockKey(owner, repo, stack string) string {
+func (m *Manager) lockKey(owner, repo, stack string) string {
 	return fmt.Sprintf(".pulumi/locks/%s/%s/%s.lock.json", owner, repo, stack)
 }
 
-func (m *S3LockManager) repoLocksPrefix(owner, repo string) string {
+func (m *Manager) repoLocksPrefix(owner, repo string) string {
 	return fmt.Sprintf(".pulumi/locks/%s/%s/", owner, repo)
 }
 
 // GetWorkspacePath returns the standard workspace directory path on disk.
-func (m *S3LockManager) GetWorkspacePath(owner, repo string, prNum int, stack string) string {
+func (m *Manager) GetWorkspacePath(owner, repo string, prNum int, stack string) string {
 	return filepath.Join(m.baseDir, owner, repo, fmt.Sprintf("pr-%d", prNum), stack)
 }
 
 // GetLock retrieves the lock file from S3. Returns nil if the stack is unlocked.
-func (m *S3LockManager) GetLock(ctx context.Context, owner, repo, stack string) (*Lock, error) {
+func (m *Manager) GetLock(ctx context.Context, owner, repo, stack string) (*Lock, error) {
 	if m.bucket == "" {
 		return nil, fmt.Errorf("STATE_BUCKET environment variable is not configured")
 	}
@@ -154,7 +156,7 @@ func (m *S3LockManager) GetLock(ctx context.Context, owner, repo, stack string) 
 }
 
 // SaveLock stores or updates the lock JSON file in S3.
-func (m *S3LockManager) SaveLock(ctx context.Context, lock *Lock) error {
+func (m *Manager) SaveLock(ctx context.Context, lock *Lock) error {
 	if m.bucket == "" {
 		return fmt.Errorf("STATE_BUCKET environment variable is not configured")
 	}
@@ -187,7 +189,7 @@ func (m *S3LockManager) SaveLock(ctx context.Context, lock *Lock) error {
 }
 
 // DeleteLock removes the stack lock file from S3 and cleans up the local workspace folder.
-func (m *S3LockManager) DeleteLock(ctx context.Context, owner, repo string, prNum int, stack string) error {
+func (m *Manager) DeleteLock(ctx context.Context, owner, repo string, prNum int, stack string) error {
 	if m.bucket != "" {
 		key := m.lockKey(owner, repo, stack)
 		_, err := m.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -207,7 +209,7 @@ func (m *S3LockManager) DeleteLock(ctx context.Context, owner, repo string, prNu
 }
 
 // DeleteAllPRLocks removes all S3 locks owned by the given PR and cleans up its workspace directory.
-func (m *S3LockManager) DeleteAllPRLocks(ctx context.Context, owner, repo string, prNum int) error {
+func (m *Manager) DeleteAllPRLocks(ctx context.Context, owner, repo string, prNum int) error {
 	if m.bucket != "" {
 		prefix := m.repoLocksPrefix(owner, repo)
 		listResp, err := m.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -236,7 +238,7 @@ func (m *S3LockManager) DeleteAllPRLocks(ctx context.Context, owner, repo string
 	return nil
 }
 
-func (m *S3LockManager) getLockByKey(ctx context.Context, key string) (*Lock, error) {
+func (m *Manager) getLockByKey(ctx context.Context, key string) (*Lock, error) {
 	resp, err := m.s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(m.bucket),
 		Key:    aws.String(key),

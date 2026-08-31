@@ -1,17 +1,17 @@
-package cmd
+package server
 
 import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
-	"os"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	ghwebhook "github.com/go-playground/webhooks/v6/github"
 	"github.com/google/go-github/v90/github"
 
-	"babylon/internal"
+	"babylon/internal/git"
+	"babylon/internal/lock"
+	"babylon/internal/pulumi"
 )
 
 func postStatusComment(
@@ -32,11 +32,9 @@ func postStatusComment(
 	return err
 }
 
-func executePulumi(
+func (s *Server) executePulumi(
 	ctx context.Context,
 	ghClient *github.Client,
-	appsTransport *ghinstallation.AppsTransport,
-	lockManager *internal.S3LockManager,
 	installationID int64,
 	owner, repo string,
 	prNum int,
@@ -62,7 +60,7 @@ func executePulumi(
 	log.Printf("PR #%d target branch: %s (SHA: %s)", prNum, branchName, headSHA)
 
 	// Check existing S3 Lock for this stack
-	existingLock, err := lockManager.GetLock(ctx, owner, repo, stack)
+	existingLock, err := s.lockManager.GetLock(ctx, owner, repo, stack)
 	if err != nil {
 		log.Printf("Warning: failed to query S3 lock: %v", err)
 	}
@@ -104,7 +102,7 @@ func executePulumi(
 			)
 			return
 		}
-		if err := lockManager.DeleteLock(ctx, owner, repo, prNum, stack); err != nil {
+		if err := s.lockManager.DeleteLock(ctx, owner, repo, prNum, stack); err != nil {
 			log.Printf("Error unlocking stack %s: %v", stack, err)
 		}
 		_ = postStatusComment(
@@ -154,7 +152,7 @@ func executePulumi(
 	}
 
 	// Generate GitHub App installation token for cloning/fetching
-	installationTransport := ghinstallation.NewFromAppsTransport(appsTransport, installationID)
+	installationTransport := ghinstallation.NewFromAppsTransport(s.appsTransport, installationID)
 	token, err := installationTransport.Token(ctx)
 	if err != nil {
 		log.Printf("Failed to get installation token: %v", err)
@@ -169,7 +167,7 @@ func executePulumi(
 	}
 
 	// Locate persistent workspace directory for this PR & stack
-	destDir := lockManager.GetWorkspacePath(owner, repo, prNum, stack)
+	destDir := s.lockManager.GetWorkspacePath(owner, repo, prNum, stack)
 
 	// Synchronize Git workspace
 	log.Printf(
@@ -180,7 +178,7 @@ func executePulumi(
 		branchName,
 		destDir,
 	)
-	isNew, err := internal.SyncGhRepo(ctx, token, owner, repo, prNum, destDir)
+	isNew, err := git.SyncRepo(ctx, token, owner, repo, prNum, destDir)
 	if err != nil {
 		log.Printf("Git sync failed: %v", err)
 		_ = postStatusComment(
@@ -194,8 +192,8 @@ func executePulumi(
 	}
 	log.Printf("Successfully synchronized workspace at %s (isNew: %v)", destDir, isNew)
 
-	// 9. Locate Pulumi CLI binary
-	pulumiPath, pulumiBinDir, err := internal.LocatePulumiCLI()
+	// Locate Pulumi CLI binary
+	pulumiPath, pulumiBinDir, err := pulumi.LocateCLI()
 	if err != nil {
 		log.Printf("Pulumi executable not found: %v", err)
 		_ = postStatusComment(
@@ -208,8 +206,8 @@ func executePulumi(
 		return
 	}
 
-	// 10. Discover Pulumi project directory containing Pulumi.yaml
-	workDir, err := internal.FindPulumiDir(destDir)
+	// Discover Pulumi project directory containing Pulumi.yaml
+	workDir, err := pulumi.FindProjectDir(destDir)
 	if err != nil {
 		log.Printf("Pulumi project discovery failed: %v", err)
 		_ = postStatusComment(
@@ -226,8 +224,8 @@ func executePulumi(
 	}
 	log.Printf("Discovered Pulumi project directory: %s", workDir)
 
-	// 11. Install Python virtualenv & dependencies
-	extraEnv, err := internal.InstallProjectDependencies(ctx, workDir, pulumiBinDir)
+	// Install Python virtualenv & dependencies
+	extraEnv, err := pulumi.InstallDependencies(ctx, workDir, pulumiBinDir)
 	if err != nil {
 		log.Printf("Dependency install failed: %v", err)
 		_ = postStatusComment(
@@ -240,8 +238,8 @@ func executePulumi(
 		return
 	}
 
-	// 12. Execute pulumi command in discovered project directory
-	output, err := internal.RunPulumiCommand(ctx, pulumiPath, workDir, stack, extraEnv, command)
+	// Execute pulumi command in discovered project directory
+	output, err := pulumi.RunCommand(ctx, pulumiPath, workDir, stack, extraEnv, command)
 	log.Printf(
 		"--- PULUMI OUTPUT START ---\n%s\n--- PULUMI OUTPUT END ---",
 		output,
@@ -268,7 +266,7 @@ func executePulumi(
 
 		switch command {
 		case "preview":
-			if saveErr := lockManager.SaveLock(ctx, &internal.Lock{
+			if saveErr := s.lockManager.SaveLock(ctx, &lock.Lock{
 				Owner:         owner,
 				Repo:          repo,
 				PRNumber:      prNum,
@@ -282,7 +280,7 @@ func executePulumi(
 				log.Printf("ERROR: Failed to save S3 lock for stack %s: %v", stack, saveErr)
 			}
 		case "up", "destroy":
-			if delErr := lockManager.DeleteLock(ctx, owner, repo, prNum, stack); delErr != nil {
+			if delErr := s.lockManager.DeleteLock(ctx, owner, repo, prNum, stack); delErr != nil {
 				log.Printf("ERROR: Failed to release S3 lock for stack %s: %v", stack, delErr)
 			} else {
 				log.Printf("Released S3 lock and cleaned up workspace for stack %s after %s", stack, command)
@@ -291,11 +289,7 @@ func executePulumi(
 	}
 }
 
-func handleIssueCommentEvent(
-	payload ghwebhook.IssueCommentPayload,
-	appsTransport *ghinstallation.AppsTransport,
-	lockManager *internal.S3LockManager,
-) {
+func (s *Server) handleIssueCommentEvent(payload ghwebhook.IssueCommentPayload) {
 	if payload.Issue.PullRequest == nil {
 		return
 	}
@@ -316,7 +310,7 @@ func handleIssueCommentEvent(
 	log.Printf("Processing comment #%d on PR #%d by @%s", payload.Comment.ID, prNum, commenter)
 
 	// Parse command from comment
-	cmd, stack := internal.ParsePulumiCommand(commentBody)
+	cmd, stack := pulumi.ParseCommand(commentBody)
 	if cmd == "" {
 		return // Not a Pulumi command, ignore
 	}
@@ -330,7 +324,7 @@ func handleIssueCommentEvent(
 
 	// Create GitHub client authenticated as the GitHub App installation for this repo
 	installationTransport := ghinstallation.NewFromAppsTransport(
-		appsTransport,
+		s.appsTransport,
 		payload.Installation.ID,
 	)
 	ghClient, err := github.NewClient(github.WithTransport(installationTransport))
@@ -339,11 +333,9 @@ func handleIssueCommentEvent(
 		return
 	}
 
-	executePulumi(
+	s.executePulumi(
 		ctx,
 		ghClient,
-		appsTransport,
-		lockManager,
 		payload.Installation.ID,
 		owner,
 		repo,
@@ -354,10 +346,7 @@ func handleIssueCommentEvent(
 	)
 }
 
-func handlePullRequestEvent(
-	payload ghwebhook.PullRequestPayload,
-	lockManager *internal.S3LockManager,
-) {
+func (s *Server) handlePullRequestEvent(payload ghwebhook.PullRequestPayload) {
 	// If PR is closed or merged, clean up all S3 locks and workspace files for this PR
 	if payload.Action == "closed" {
 		prNum := int(payload.PullRequest.Number)
@@ -371,76 +360,8 @@ func handlePullRequestEvent(
 			repo,
 		)
 		ctx := context.Background()
-		if err := lockManager.DeleteAllPRLocks(ctx, owner, repo, prNum); err != nil {
+		if err := s.lockManager.DeleteAllPRLocks(ctx, owner, repo, prNum); err != nil {
 			log.Printf("Error cleaning up S3 locks for closed PR #%d: %v", prNum, err)
 		}
 	}
-}
-
-func InitServer(appID int64, privateKeyPath, webhookSecret string) {
-	ctx := context.Background()
-
-	// Initialize GitHub App Transport with private key
-	appsTransport, err := ghinstallation.NewAppsTransportKeyFromFile(
-		http.DefaultTransport,
-		appID,
-		privateKeyPath,
-	)
-	if err != nil {
-		log.Fatalf("Failed to initialize GitHub App transport: %v", err)
-	}
-
-	// Initialize S3 Lock Manager
-	bucketName := os.Getenv("STATE_BUCKET")
-	if bucketName == "" {
-		bucketName = os.Getenv("BABYLON_S3_BUCKET")
-	}
-	if bucketName == "" {
-		log.Printf(
-			"⚠️ WARNING: Neither STATE_BUCKET nor BABYLON_S3_BUCKET is set. S3 locking will be disabled.",
-		)
-	}
-	lockManager, err := internal.NewS3LockManager(ctx, bucketName, "")
-	if err != nil {
-		log.Fatalf("Failed to initialize S3 Lock Manager: %v", err)
-	}
-	log.Printf(
-		"S3 Lock Manager initialized with bucket: '%s' (AWS Region: %s)",
-		lockManager.Bucket(),
-		lockManager.Region(),
-	)
-
-	// Create webhook receiver (with secret if configured)
-	var opts []ghwebhook.Option
-	if webhookSecret != "" {
-		opts = append(opts, ghwebhook.Options.Secret(webhookSecret))
-	}
-	hook, err := ghwebhook.New(opts...)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Received %s request on /webhook", r.Method)
-		event, err := hook.Parse(r, ghwebhook.IssueCommentEvent, ghwebhook.PullRequestEvent)
-		if err != nil {
-			log.Printf("Webhook parse error: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "Webhook parse error: %v\n", err)
-			return
-		}
-
-		log.Printf("Successfully parsed event: %T", event)
-		switch e := event.(type) {
-		case ghwebhook.IssueCommentPayload:
-			handleIssueCommentEvent(e, appsTransport, lockManager)
-		case ghwebhook.PullRequestPayload:
-			handlePullRequestEvent(e, lockManager)
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "OK")
-	})
-
-	log.Println("Babylon listening on :8090")
-	log.Fatal(http.ListenAndServe(":8090", nil))
 }

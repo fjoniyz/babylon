@@ -12,7 +12,7 @@ RUN go mod download
 
 # Copy source code and compile statically linked binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /babylon .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /babylon ./cmd/babylon
 
 # Stage 2: Runtime image with Python and Pulumi
 FROM python:3.12-slim-bookworm
